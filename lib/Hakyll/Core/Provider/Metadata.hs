@@ -16,6 +16,7 @@ import           Control.Exception             (Exception, throwIO)
 import           Control.Monad                 (guard)
 import qualified Data.ByteString               as B
 import qualified Data.ByteString.Char8         as BC
+import           Data.Char                     (toLower)
 import           Data.List.Extended            (breakWhen)
 import qualified Data.Map                      as M
 import           Data.Maybe                    (fromMaybe)
@@ -28,6 +29,8 @@ import           Hakyll.Core.Metadata
 import           Hakyll.Core.Provider.Internal
 import           System.IO                     as IO
 import           System.IO.Error               (modifyIOError, ioeSetLocation)
+import qualified Text.Parsec                   as P
+import           Text.Parsec.String            (Parser)
 
 
 --------------------------------------------------------------------------------
@@ -74,11 +77,13 @@ probablyHasMetadataHeader fp = do
     handle <- IO.openFile fp IO.ReadMode
     bs     <- BC.hGet handle 1024
     IO.hClose handle
-    return $ isMetadataHeader bs
+    return $ isMetadataHeader bs || isOrgMetadataHeader bs
   where
     isMetadataHeader bs =
         let pre = BC.takeWhile (\x -> x /= '\n' && x /= '\r') bs
         in  BC.length pre >= 3 && BC.all (== '-') pre
+    isOrgMetadataHeader bs =
+        (BC.pack "#+") `BC.isPrefixOf` bs
 
 
 --------------------------------------------------------------------------------
@@ -109,6 +114,11 @@ splitMetadata str0 = fromMaybe (Nothing, str0) $ do
     isDash        c = c == '-'  || c == '.'
     isInlineSpace c = c == '\t' || c == ' '
 
+--------------------------------------------------------------------------------
+-- | Parse a blank line (only space characters and the final newline).
+blankline :: Parser Char
+blankline = P.skipMany1 inlineSpace *> P.newline
+
 
 --------------------------------------------------------------------------------
 parseMetadata :: String -> Either Yaml.ParseException Metadata
@@ -116,10 +126,27 @@ parseMetadata = Yaml.decodeEither' . T.encodeUtf8 . T.pack
 
 
 --------------------------------------------------------------------------------
+-- | Parse a org-style metadata block, including trailing newlines
+orgMetadataBlock :: Parser [(String, String)]
+orgMetadataBlock = P.try $ P.many1 orgMetaline <* P.skipMany blankline
+
+
+--------------------------------------------------------------------------------
+-- | Parse a org-style metadata definition
+orgMetaline :: Parser (String, String)
+orgMetaline = P.try $ P.string "#+" *> ((,) <$> key <*> value)
+  where
+    key   = map toLower <$> P.many1 P.alphaNum
+                        <* P.char ':'
+                        <* P.skipMany inlineSpace
+    value = P.manyTill P.anyChar newline
+
+
+--------------------------------------------------------------------------------
 parsePage :: String -> Either Yaml.ParseException (Metadata, String)
 parsePage fileContent = case mbMetaBlock of
     Nothing        -> return (mempty, content)
-    Just metaBlock -> case parseMetadata metaBlock of
+    Just metaBlock -> case orgMetadata metaBlock of
         Left  err  -> Left   err
         Right meta -> return (meta, content)
   where
